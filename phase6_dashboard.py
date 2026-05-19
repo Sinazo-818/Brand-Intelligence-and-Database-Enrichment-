@@ -10,7 +10,6 @@
 
 import streamlit as st
 import pandas as pd
-import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -18,7 +17,7 @@ import plotly.graph_objects as go
 # CONFIG
 # ============================================================
 
-DB_PATH = "brand_intelligence.db"
+DATA_PATH = "dashboard_data.csv"
 
 st.set_page_config(
     page_title="Brand Intelligence Dashboard",
@@ -32,11 +31,39 @@ st.set_page_config(
 
 @st.cache_data
 def load_data():
-    conn = sqlite3.connect(DB_PATH)
-    tweets  = pd.read_sql("SELECT * FROM tweets",        conn)
-    brands  = pd.read_sql("SELECT * FROM brand_summary", conn)
-    topics  = pd.read_sql("SELECT * FROM topic_reference", conn)
-    conn.close()
+    tweets = pd.read_csv(DATA_PATH, low_memory=False)
+
+    # Build brand summary from tweets
+    brand_df = tweets[tweets["is_brand_account"] == 1]
+    brands = brand_df.groupby("author_id").agg(
+        total_tweets    = ("tweet_id",        "count"),
+        avg_sentiment   = ("sentiment_score", "mean"),
+        pct_positive    = ("sentiment_label", lambda x: (x == "positive").mean() * 100),
+        pct_negative    = ("sentiment_label", lambda x: (x == "negative").mean() * 100),
+        pct_neutral     = ("sentiment_label", lambda x: (x == "neutral").mean() * 100),
+        most_active_hour= ("hour",            lambda x: x.mode()[0] if not x.mode().empty else None),
+        most_active_day = ("day_of_week",     lambda x: x.mode()[0] if not x.mode().empty else None),
+        viral_tweets    = ("is_viral",        "sum"),
+        avg_word_count  = ("word_count",      "mean"),
+    ).reset_index()
+
+    intent_mode = brand_df.groupby("author_id")["intent"].agg(
+        lambda x: x.mode()[0] if not x.mode().empty else "unknown"
+    ).reset_index().rename(columns={"intent": "most_common_intent"})
+    brands = brands.merge(intent_mode, on="author_id", how="left")
+    brands["avg_sentiment"] = brands["avg_sentiment"].round(3)
+    brands["avg_word_count"] = brands["avg_word_count"].round(1)
+
+    # Build topic reference
+    topic_df = tweets[tweets["topic_label"].notna() & (tweets["topic_label"] != "unclassified")]
+    topics = topic_df.groupby(["topic_id", "topic_label"]).agg(
+        tweet_count   = ("tweet_id",        "count"),
+        avg_sentiment = ("sentiment_score", "mean"),
+        top_intent    = ("intent",          lambda x: x.mode()[0] if not x.mode().empty else "unknown"),
+    ).reset_index()
+    topics["pct_of_corpus"] = (topics["tweet_count"] / len(tweets) * 100).round(2)
+    topics["avg_sentiment"]  = topics["avg_sentiment"].round(3)
+
     return tweets, brands, topics
 
 tweets, brands, topics = load_data()
